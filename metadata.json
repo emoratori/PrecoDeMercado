@@ -1,0 +1,8 @@
+{
+  "name": "Preço de Mercado - Moratori",
+  "description": "App pessoal e offline para registrar preços de produtos em mercados por leitura de código de barras.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

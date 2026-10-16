@@ -1,0 +1,24 @@
+{
+  "name": "Preço de Mercado - Moratori",
+  "short_name": "PreçoMercado",
+  "description": "App pessoal e offline para registrar e comparar preços em supermercados via código de barras.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#020617",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
