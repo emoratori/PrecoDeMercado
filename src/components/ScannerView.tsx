@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { BrowserMultiFormatReader, BarcodeFormat, DecodeHintType } from '@zxing/library';
 import { Market, Product, ScannerStatus } from '../types';
 import { storage } from '../services/storage';
 import { playScanFeedback, playSuccessSound } from '../services/audioHaptics';
@@ -10,11 +10,9 @@ import {
   FlashlightOff,
   Keyboard,
   Barcode as BarcodeIcon,
-  Tag,
   Store,
   ChevronRight,
   TrendingDown,
-  Sparkles,
   AlertCircle,
   CheckCircle2,
   PackagePlus,
@@ -59,30 +57,47 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
   const [manualCodeModal, setManualCodeModal] = useState(false);
   const [manualCodeInput, setManualCodeInput] = useState('');
 
-  const html5QrCodeRef = useRef<Html5Qrcode | null>(null);
-  const isScanningRef = useRef<boolean>(false);
-  const scannerContainerId = 'interactive-barcode-scanner';
+  // Native Video & Stream Refs
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const isScanningActiveRef = useRef<boolean>(true);
+  const animationFrameIdRef = useRef<number | null>(null);
+  const zxingReaderRef = useRef<BrowserMultiFormatReader | null>(null);
 
-  // Load known brands for autocomplete
+  // Load known brands
   useEffect(() => {
     setKnownBrands(storage.getAllKnownBrands());
   }, []);
 
+  // Sync ref with scannerStatus to avoid stale closures
+  useEffect(() => {
+    isScanningActiveRef.current = scannerStatus === 'WAITING_SCAN';
+  }, [scannerStatus]);
+
   // Handle barcode scanned (from camera or manual entry)
-  const handleBarcodeDetected = (barcode: string) => {
+  const handleBarcodeDetected = useCallback((barcode: string) => {
     const clean = barcode.trim();
-    if (!clean || scannerStatus !== 'WAITING_SCAN') return;
+    if (!clean) return;
 
-    // 1. Pause scanner
-    pauseScanner();
+    // Immediately stop further scan triggers to prevent loop/flicker
+    isScanningActiveRef.current = false;
 
-    // 2. Instant tactile and audio feedback
+    // Pause video
+    if (videoRef.current) {
+      try {
+        videoRef.current.pause();
+      } catch {
+        // Ignore pause error
+      }
+    }
+
+    // Instant tactile and audio feedback
     const settings = storage.getSettings();
     playScanFeedback(settings.soundEnabled, settings.vibrationEnabled);
 
     setScannedBarcode(clean);
 
-    // 3. Look up product
+    // Look up product
     const existing = storage.getProductByBarcode(clean);
     if (existing) {
       setCurrentProduct(existing);
@@ -100,126 +115,174 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
       setNewProductQuantity('');
       setScannerStatus('NEW_PRODUCT');
     }
-  };
+  }, []);
 
-  // Start Html5Qrcode camera
-  const startScanner = async () => {
-    if (typeof window === 'undefined') return;
-    if (isScanningRef.current) return;
-
+  // Initialize Camera Stream directly using getUserMedia
+  const initCamera = useCallback(async () => {
     try {
       setCameraError(null);
-      if (!html5QrCodeRef.current) {
-        html5QrCodeRef.current = new Html5Qrcode(scannerContainerId, {
-          formatsToSupport: [
-            Html5QrcodeSupportedFormats.EAN_13,
-            Html5QrcodeSupportedFormats.EAN_8,
-            Html5QrcodeSupportedFormats.UPC_A,
-            Html5QrcodeSupportedFormats.UPC_E,
-            Html5QrcodeSupportedFormats.CODE_128,
-            Html5QrcodeSupportedFormats.QR_CODE,
-          ],
-          verbose: false,
-        });
+      isScanningActiveRef.current = true;
+
+      // Stop any existing stream
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+        mediaStreamRef.current = null;
       }
 
-      await html5QrCodeRef.current.start(
-        { facingMode: 'environment' },
-        {
-          fps: 15,
-          qrbox: { width: 280, height: 160 },
-          aspectRatio: 1.333,
+      // Request camera
+      const constraints: MediaStreamConstraints = {
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
         },
-        (decodedText) => {
-          handleBarcodeDetected(decodedText);
-        },
-        () => {
-          // Frame scan error (normal when no barcode in frame)
-        }
-      );
+        audio: false,
+      };
 
-      isScanningRef.current = true;
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      mediaStreamRef.current = stream;
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.setAttribute('playsinline', 'true');
+        await videoRef.current.play().catch(() => {});
+      }
 
       // Check torch capability
-      try {
-        const capabilities = html5QrCodeRef.current.getRunningTrackCapabilities();
-        if ('torch' in capabilities) {
-          setTorchSupported(true);
+      const videoTrack = stream.getVideoTracks()[0];
+      if (videoTrack) {
+        try {
+          const capabilities = videoTrack.getCapabilities?.() as { torch?: boolean };
+          if (capabilities && capabilities.torch) {
+            setTorchSupported(true);
+          }
+        } catch {
+          // Ignore capabilities check failure
         }
-      } catch {
-        // Torch capability check not supported
       }
+
+      // Start Barcode Detection Loop
+      startDetectionLoop();
     } catch (err: unknown) {
-      console.warn('Camera start error:', err);
-      isScanningRef.current = false;
+      console.warn('Camera access error:', err);
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('NotAllowedError') || msg.includes('Permission')) {
-        setCameraError('Permissão de câmera não concedida. Permita o acesso nas configurações do navegador ou use o botão de digitar código.');
+        setCameraError('Permissão da câmera não concedida. Permita o acesso nas configurações do navegador ou digite o código.');
       } else {
-        setCameraError('Câmera indisponível neste dispositivo ou aba. Você pode usar a digitação manual ou os testes rápidos.');
+        setCameraError('Não foi possível iniciar a câmera deste aparelho. Use a digitação manual ou os testes rápidos.');
       }
     }
-  };
+  }, []);
 
-  const pauseScanner = () => {
-    if (html5QrCodeRef.current && isScanningRef.current) {
-      try {
-        html5QrCodeRef.current.pause(true);
-      } catch (err) {
-        console.warn('Pause error', err);
-      }
-    }
-  };
+  // Continuous Detection Loop (uses Native BarcodeDetector if available, ZXing as fallback)
+  const startDetectionLoop = useCallback(() => {
+    let lastScanTime = 0;
+    const scanIntervalMs = 120; // 8 scans per second is ideal for accuracy and zero lag
 
-  const resumeScanner = () => {
-    if (html5QrCodeRef.current) {
+    // Check if browser has native BarcodeDetector API (Android Chrome has it built-in!)
+    const hasNativeBarcodeDetector =
+      typeof window !== 'undefined' && 'BarcodeDetector' in window;
+
+    let nativeDetector: any = null;
+    if (hasNativeBarcodeDetector) {
       try {
-        html5QrCodeRef.current.resume();
+        const BarcodeDetectorClass = (window as any).BarcodeDetector;
+        nativeDetector = new BarcodeDetectorClass({
+          formats: [
+            'ean_13',
+            'ean_8',
+            'upc_a',
+            'upc_e',
+            'code_128',
+            'code_39',
+            'qr_code',
+          ],
+        });
       } catch {
-        // If resume fails, restart
-        startScanner();
-      }
-    } else {
-      startScanner();
-    }
-  };
-
-  const stopScanner = async () => {
-    if (html5QrCodeRef.current && isScanningRef.current) {
-      try {
-        await html5QrCodeRef.current.stop();
-        isScanningRef.current = false;
-      } catch {
-        // Stop error
+        nativeDetector = null;
       }
     }
-  };
 
-  // Toggle flashlight
-  const toggleTorch = async () => {
-    if (!html5QrCodeRef.current || !torchSupported) return;
-    try {
-      const nextTorch = !isTorchOn;
-      await html5QrCodeRef.current.applyVideoConstraints({
-        advanced: [{ torch: nextTorch } as MediaTrackConstraintSet],
-      });
-      setIsTorchOn(nextTorch);
-    } catch (err) {
-      console.warn('Torch toggle error', err);
+    // Fallback ZXing reader
+    if (!nativeDetector && !zxingReaderRef.current) {
+      const hints = new Map();
+      hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+        BarcodeFormat.EAN_13,
+        BarcodeFormat.EAN_8,
+        BarcodeFormat.UPC_A,
+        BarcodeFormat.UPC_E,
+        BarcodeFormat.CODE_128,
+        BarcodeFormat.QR_CODE,
+      ]);
+      hints.set(DecodeHintType.TRY_HARDER, true);
+      zxingReaderRef.current = new BrowserMultiFormatReader(hints);
     }
-  };
 
-  // Initialize camera when in WAITING_SCAN
+    const loop = async (timestamp: number) => {
+      if (isScanningActiveRef.current && videoRef.current && videoRef.current.readyState >= 2) {
+        if (timestamp - lastScanTime >= scanIntervalMs) {
+          lastScanTime = timestamp;
+
+          try {
+            if (nativeDetector) {
+              const barcodes = await nativeDetector.detect(videoRef.current);
+              if (barcodes && barcodes.length > 0 && isScanningActiveRef.current) {
+                const detectedCode = barcodes[0].rawValue;
+                if (detectedCode) {
+                  handleBarcodeDetected(detectedCode);
+                  return; // Stop loop once detected
+                }
+              }
+            } else if (zxingReaderRef.current && isScanningActiveRef.current) {
+              // Fallback decode from video element
+              const result = zxingReaderRef.current.decode(videoRef.current);
+              if (result && isScanningActiveRef.current) {
+                handleBarcodeDetected(result.getText());
+                return;
+              }
+            }
+          } catch {
+            // Normal scan miss between frames
+          }
+        }
+      }
+
+      animationFrameIdRef.current = requestAnimationFrame(loop);
+    };
+
+    animationFrameIdRef.current = requestAnimationFrame(loop);
+  }, [handleBarcodeDetected]);
+
+  // Start camera on mount
   useEffect(() => {
-    if (scannerStatus === 'WAITING_SCAN') {
-      startScanner();
-    }
+    initCamera();
 
     return () => {
       // Cleanup on unmount
-      stopScanner();
+      if (animationFrameIdRef.current) {
+        cancelAnimationFrame(animationFrameIdRef.current);
+      }
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+        mediaStreamRef.current = null;
+      }
     };
-  }, []);
+  }, [initCamera]);
+
+  // Toggle Flashlight
+  const toggleTorch = async () => {
+    if (!mediaStreamRef.current || !torchSupported) return;
+    try {
+      const track = mediaStreamRef.current.getVideoTracks()[0];
+      const nextTorch = !isTorchOn;
+      await (track as any).applyConstraints({
+        advanced: [{ torch: nextTorch }],
+      });
+      setIsTorchOn(nextTorch);
+    } catch (err) {
+      console.warn('Torch toggle error:', err);
+    }
+  };
 
   // Save Price Handler
   const handleSavePrice = () => {
@@ -275,7 +338,12 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     setPriceCents(0);
     setSavedPriceNotice(null);
     setScannerStatus('WAITING_SCAN');
-    resumeScanner();
+
+    // Resume video and scanner loop cleanly
+    isScanningActiveRef.current = true;
+    if (videoRef.current) {
+      videoRef.current.play().catch(() => {});
+    }
   };
 
   // Brand autocomplete logic
@@ -325,14 +393,20 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         </button>
       </header>
 
-      {/* 2. Área Central: Visor do Scanner / Câmera */}
+      {/* 2. Área Central: Câmera Nativa sem dependências intrusivas */}
       <div className="relative flex-1 bg-black flex flex-col justify-center items-center overflow-hidden">
-        {/* Container onde a câmera é renderizada */}
-        <div id={scannerContainerId} className="w-full h-full object-cover" />
+        {/* Elemento de Vídeo Real HTML5 */}
+        <video
+          ref={videoRef}
+          playsInline
+          autoPlay
+          muted
+          className="w-full h-full object-cover"
+        />
 
-        {/* Overlay com mira óptica quando estiver no estado WAITING_SCAN */}
+        {/* Overlay com mira óptica exclusivo do estado WAITING_SCAN */}
         {scannerStatus === 'WAITING_SCAN' && (
-          <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center p-6">
+          <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center p-6 z-10">
             {/* Retângulo de mira centralizado */}
             <div className="relative w-72 h-44 border-2 border-emerald-400/80 rounded-2xl shadow-[0_0_20px_rgba(16,185,129,0.3)] flex items-center justify-center">
               {/* Linha vermelha central de leitor a laser */}
@@ -353,7 +427,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
 
         {/* Câmera pausada overlay (se produto detectado ou salvo) */}
         {scannerStatus !== 'WAITING_SCAN' && (
-          <div className="absolute inset-0 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-4 z-10">
             <div className="text-center">
               <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
                 <CheckCircle2 className="w-3.5 h-3.5" />
@@ -365,7 +439,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
 
         {/* Botões de Ação Rápida Flutuantes sobre a Câmera */}
         {scannerStatus === 'WAITING_SCAN' && (
-          <div className="absolute top-3 right-3 flex items-center gap-2 z-10">
+          <div className="absolute top-3 right-3 flex items-center gap-2 z-20">
             {torchSupported && (
               <button
                 type="button"
@@ -392,9 +466,9 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
           </div>
         )}
 
-        {/* Simulador rápido de Códigos para Teste Rápido (em desktop/sem pacote) */}
+        {/* Simulador rápido de Códigos para Teste Rápido */}
         {scannerStatus === 'WAITING_SCAN' && (
-          <div className="absolute bottom-2 left-2 right-2 flex items-center justify-center gap-1.5 z-10 flex-wrap">
+          <div className="absolute bottom-2 left-2 right-2 flex items-center justify-center gap-1.5 z-20 flex-wrap">
             <span className="text-[10px] text-slate-400 bg-black/60 px-2 py-0.5 rounded-md">
               Testar rápido:
             </span>
@@ -424,15 +498,15 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
 
         {/* Mensagem caso câmera não seja permitida */}
         {cameraError && scannerStatus === 'WAITING_SCAN' && (
-          <div className="absolute inset-0 bg-slate-950/95 flex flex-col items-center justify-center p-6 text-center z-20">
+          <div className="absolute inset-0 bg-slate-950/95 flex flex-col items-center justify-center p-6 text-center z-30">
             <AlertCircle className="w-12 h-12 text-amber-400 mb-3" />
             <h3 className="text-base font-bold text-white mb-1">Acesso à Câmera</h3>
             <p className="text-xs text-slate-400 max-w-sm mb-4">{cameraError}</p>
             <div className="flex gap-2">
               <button
                 type="button"
-                onClick={startScanner}
-                className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs flex items-center gap-1.5"
+                onClick={initCamera}
+                className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs flex items-center gap-1.5 cursor-pointer"
               >
                 <RefreshCw className="w-3.5 h-3.5" />
                 Tentar Novamente
@@ -440,7 +514,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
               <button
                 type="button"
                 onClick={() => setManualCodeModal(true)}
-                className="px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center gap-1.5"
+                className="px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 cursor-pointer"
               >
                 <Keyboard className="w-3.5 h-3.5" />
                 Digitar Código Manualmente
@@ -454,7 +528,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
 
       {/* ESTADO 1: PRODUTO ENCONTRADO -> Exibe Card e Keypad Nativo */}
       {scannerStatus === 'PRODUCT_FOUND' && currentProduct && (
-        <div className="shrink-0 bg-slate-900 border-t border-slate-800 animate-in slide-in-from-bottom duration-200">
+        <div className="shrink-0 bg-slate-900 border-t border-slate-800 animate-in slide-in-from-bottom duration-200 z-30">
           {/* Card do Produto Identificado */}
           <div className="p-3.5 bg-slate-800/80 border-b border-slate-700/60 flex items-start justify-between gap-3">
             <div className="min-w-0">
@@ -508,11 +582,11 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         </div>
       )}
 
-      {/* ESTADO 2: PRODUTO NOVO -> Formulário Inline com Chips e Autocomplete */}
+      {/* ESTADO 2: PRODUTO NOVO -> Formulário Inline */}
       {scannerStatus === 'NEW_PRODUCT' && (
         <form
           onSubmit={handleCreateNewProduct}
-          className="shrink-0 bg-slate-900 border-t border-slate-800 p-4 space-y-3.5 max-h-[85vh] overflow-y-auto animate-in slide-in-from-bottom duration-200"
+          className="shrink-0 bg-slate-900 border-t border-slate-800 p-4 space-y-3.5 max-h-[85vh] overflow-y-auto animate-in slide-in-from-bottom duration-200 z-30"
         >
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -527,7 +601,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
             <button
               type="button"
               onClick={handleNextProduct}
-              className="text-xs text-slate-400 hover:text-white px-2 py-1"
+              className="text-xs text-slate-400 hover:text-white px-2 py-1 cursor-pointer"
             >
               Cancelar
             </button>
@@ -542,7 +616,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
               type="text"
               autoFocus
               required
-              placeholder="Ex: Azeite Extra Virgem 500ml"
+              placeholder="Ex: Azeite Extra Virgem"
               value={newProductName}
               onChange={(e) => setNewProductName(e.target.value)}
               className="w-full px-3.5 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-white placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
@@ -567,7 +641,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
 
             {/* Dropdown de sugestões de marca */}
             {showBrandSuggestions && (
-              <div className="absolute left-0 right-0 top-full mt-1 bg-slate-800 border border-slate-700 rounded-xl shadow-xl overflow-hidden z-30 max-h-36 overflow-y-auto">
+              <div className="absolute left-0 right-0 top-full mt-1 bg-slate-800 border border-slate-700 rounded-xl shadow-xl overflow-hidden z-40 max-h-36 overflow-y-auto">
                 {brandSuggestions.map((brand) => (
                   <div
                     key={brand}
@@ -667,7 +741,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
 
       {/* ESTADO 3: PREÇO SALVO -> Câmera Pausada e BOTÃO GIGANTE "PRÓXIMO PRODUTO" */}
       {scannerStatus === 'PRICE_SAVED' && (
-        <div className="shrink-0 bg-slate-900 border-t border-slate-800 p-4 space-y-3 animate-in slide-in-from-bottom duration-200">
+        <div className="shrink-0 bg-slate-900 border-t border-slate-800 p-4 space-y-3 animate-in slide-in-from-bottom duration-200 z-30">
           {/* Confirmação do produto salvo */}
           <div className="p-3 rounded-2xl bg-emerald-950/80 border border-emerald-600/50 flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -687,7 +761,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
             </div>
           </div>
 
-          {/* BOTÃO GIGANTE "PRÓXIMO PRODUTO" (Mínimo 64dp de altura, largura quase total) */}
+          {/* BOTÃO GIGANTE "PRÓXIMO PRODUTO" */}
           <button
             type="button"
             autoFocus
@@ -700,7 +774,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         </div>
       )}
 
-      {/* Modal de Digitação Manual de Código (caso o código esteja amassado) */}
+      {/* Modal de Digitação Manual de Código */}
       {manualCodeModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
           <div className="w-full max-w-sm bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-2xl">
@@ -735,14 +809,14 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                 <button
                   type="button"
                   onClick={() => setManualCodeModal(false)}
-                  className="flex-1 py-2.5 rounded-xl bg-slate-800 text-slate-300 font-semibold text-sm hover:bg-slate-700"
+                  className="flex-1 py-2.5 rounded-xl bg-slate-800 text-slate-300 font-semibold text-sm hover:bg-slate-700 cursor-pointer"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
                   disabled={!manualCodeInput.trim()}
-                  className="flex-1 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold text-sm shadow-md"
+                  className="flex-1 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold text-sm shadow-md cursor-pointer"
                 >
                   Buscar
                 </button>
