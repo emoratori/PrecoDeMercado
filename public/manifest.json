@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "Preço de Mercado - Moratori",
-  "short_name": "PreçoMercado",
-  "description": "Aplicativo pessoal e offline para registrar e comparar preços em supermercados via leitura de código de barras.",
+  "name": "Coleta de Preços - Moratori",
+  "short_name": "ColetaPreços",
+  "description": "App pessoal e offline para registrar e comparar preços em supermercados via código de barras.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
@@ -14,13 +14,13 @@
   "categories": ["shopping", "utilities", "productivity"],
   "icons": [
     {
-      "src": "/icon-192.png",
+      "src": "icon-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any maskable"
     },
     {
-      "src": "/icon-512.png",
+      "src": "icon-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"
