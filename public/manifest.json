@@ -1,10 +1,10 @@
 {
-  "id": "/",
+  "id": "/PrecoDeMercado/",
   "name": "Coleta de Preços - Moratori",
   "short_name": "ColetaPreços",
   "description": "App pessoal e offline para registrar e comparar preços em supermercados via código de barras.",
-  "start_url": "/",
-  "scope": "/",
+  "start_url": "/PrecoDeMercado/",
+  "scope": "/PrecoDeMercado/",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#020617",

@@ -1,0 +1,58 @@
+name: Compilar APK Android
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['main', 'master']
+
+jobs:
+  build-apk:
+    name: Gerar APK Android
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do Código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Configurar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Configurar Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Instalar Dependências e Capacitor
+        run: |
+          npm install --legacy-peer-deps
+          npm install --save @capacitor/core @capacitor/cli @capacitor/android --legacy-peer-deps
+
+      - name: Compilar Aplicação Web
+        run: npm run build
+
+      - name: Inicializar Projeto Android com Capacitor
+        run: |
+          npx cap add android
+          npx cap sync android
+
+      - name: Adicionar Permissões de Câmera no AndroidManifest
+        run: |
+          sed -i '/<application/i \    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />' android/app/src/main/AndroidManifest.xml
+
+      - name: Compilar APK com Gradle
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Disponibilizar APK para Download
+        uses: actions/upload-artifact@v4
+        with:
+          name: ColetaDePrecos-Moratori-v1.0.apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
