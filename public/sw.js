@@ -1,16 +1,18 @@
 // Service Worker para Preço de Mercado - Moratori
-const CACHE_NAME = 'preco-mercado-v1';
+const CACHE_NAME = 'preco-mercado-v2';
 const ASSETS_TO_CACHE = [
-  '/',
-  '/index.html',
-  '/manifest.json'
+  './',
+  './index.html',
+  './manifest.json',
+  './icon-192.png',
+  './icon-512.png'
 ];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(ASSETS_TO_CACHE).catch(() => {
-        // Cache fallback
+      return cache.addAll(ASSETS_TO_CACHE).catch((err) => {
+        console.warn('Cache addAll warning:', err);
       });
     })
   );
@@ -52,7 +54,7 @@ self.addEventListener('fetch', (event) => {
           return networkResponse;
         })
         .catch(() => {
-          return caches.match('/');
+          return caches.match('./index.html') || caches.match('./');
         });
     })
   );
