@@ -60,7 +60,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
   // Native Video & Stream Refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
-  const isScanningActiveRef = useRef<boolean>(true);
+  const isScanningActiveRef = useRef<boolean>(false);
   const animationFrameIdRef = useRef<number | null>(null);
   const zxingReaderRef = useRef<BrowserMultiFormatReader | null>(null);
 
@@ -69,115 +69,33 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     setKnownBrands(storage.getAllKnownBrands());
   }, []);
 
-  // Sync ref with scannerStatus to avoid stale closures
-  useEffect(() => {
-    isScanningActiveRef.current = scannerStatus === 'WAITING_SCAN';
-  }, [scannerStatus]);
-
-  // Handle barcode scanned (from camera or manual entry)
-  const handleBarcodeDetected = useCallback((barcode: string) => {
-    const clean = barcode.trim();
-    if (!clean) return;
-
-    // Immediately stop further scan triggers to prevent loop/flicker
+  // Stop camera stream completely to save battery and ensure a clean state
+  const stopCamera = useCallback(() => {
     isScanningActiveRef.current = false;
-
-    // Pause video
-    if (videoRef.current) {
-      try {
-        videoRef.current.pause();
-      } catch {
-        // Ignore pause error
-      }
+    if (animationFrameIdRef.current) {
+      cancelAnimationFrame(animationFrameIdRef.current);
+      animationFrameIdRef.current = null;
     }
-
-    // Instant tactile and audio feedback
-    const settings = storage.getSettings();
-    playScanFeedback(settings.soundEnabled, settings.vibrationEnabled);
-
-    setScannedBarcode(clean);
-
-    // Look up product
-    const existing = storage.getProductByBarcode(clean);
-    if (existing) {
-      setCurrentProduct(existing);
-      const lowest = storage.getLowestPriceForProduct(existing.id);
-      setLowestPriceInfo(lowest);
-      setPriceCents(0);
-      setScannerStatus('PRODUCT_FOUND');
-    } else {
-      // New product inline flow
-      setCurrentProduct(null);
-      setLowestPriceInfo(null);
-      setNewProductName('');
-      setNewProductBrand('');
-      setNewProductUnitType('g');
-      setNewProductQuantity('');
-      setScannerStatus('NEW_PRODUCT');
-    }
-  }, []);
-
-  // Initialize Camera Stream directly using getUserMedia
-  const initCamera = useCallback(async () => {
-    try {
-      setCameraError(null);
-      isScanningActiveRef.current = true;
-
-      // Stop any existing stream
-      if (mediaStreamRef.current) {
-        mediaStreamRef.current.getTracks().forEach((t) => t.stop());
-        mediaStreamRef.current = null;
-      }
-
-      // Request camera
-      const constraints: MediaStreamConstraints = {
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
-        audio: false,
-      };
-
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      mediaStreamRef.current = stream;
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.setAttribute('playsinline', 'true');
-        await videoRef.current.play().catch(() => {});
-      }
-
-      // Check torch capability
-      const videoTrack = stream.getVideoTracks()[0];
-      if (videoTrack) {
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((track) => {
         try {
-          const capabilities = videoTrack.getCapabilities?.() as { torch?: boolean };
-          if (capabilities && capabilities.torch) {
-            setTorchSupported(true);
-          }
+          track.stop();
         } catch {
-          // Ignore capabilities check failure
+          // Ignore track stop error
         }
-      }
-
-      // Start Barcode Detection Loop
-      startDetectionLoop();
-    } catch (err: unknown) {
-      console.warn('Camera access error:', err);
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes('NotAllowedError') || msg.includes('Permission')) {
-        setCameraError('Permissão da câmera não concedida. Permita o acesso nas configurações do navegador ou digite o código.');
-      } else {
-        setCameraError('Não foi possível iniciar a câmera deste aparelho. Use a digitação manual ou os testes rápidos.');
-      }
+      });
+      mediaStreamRef.current = null;
     }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    setIsTorchOn(false);
   }, []);
 
   // Continuous Detection Loop (uses Native BarcodeDetector if available, ZXing as fallback)
-  const startDetectionLoop = useCallback(() => {
+  const startDetectionLoop = useCallback((onDetected: (code: string) => void) => {
     let lastScanTime = 0;
-    const scanIntervalMs = 120; // 8 scans per second is ideal for accuracy and zero lag
+    const scanIntervalMs = 100; // 10 scans per second for instant barcode capture
 
     // Check if browser has native BarcodeDetector API (Android Chrome has it built-in!)
     const hasNativeBarcodeDetector =
@@ -229,15 +147,14 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
               if (barcodes && barcodes.length > 0 && isScanningActiveRef.current) {
                 const detectedCode = barcodes[0].rawValue;
                 if (detectedCode) {
-                  handleBarcodeDetected(detectedCode);
-                  return; // Stop loop once detected
+                  onDetected(detectedCode);
+                  return; // Stop this loop instance as onDetected closes the camera
                 }
               }
             } else if (zxingReaderRef.current && isScanningActiveRef.current) {
-              // Fallback decode from video element
               const result = zxingReaderRef.current.decode(videoRef.current);
               if (result && isScanningActiveRef.current) {
-                handleBarcodeDetected(result.getText());
+                onDetected(result.getText());
                 return;
               }
             }
@@ -247,27 +164,108 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         }
       }
 
-      animationFrameIdRef.current = requestAnimationFrame(loop);
+      if (isScanningActiveRef.current) {
+        animationFrameIdRef.current = requestAnimationFrame(loop);
+      }
     };
 
     animationFrameIdRef.current = requestAnimationFrame(loop);
-  }, [handleBarcodeDetected]);
+  }, []);
 
-  // Start camera on mount
+  // Handle barcode scanned (from camera or manual entry)
+  const handleBarcodeDetected = useCallback((barcode: string) => {
+    const clean = barcode.trim();
+    if (!clean) return;
+
+    // 1. Immediately shut down the camera completely
+    stopCamera();
+
+    // 2. Instant tactile and audio feedback
+    const settings = storage.getSettings();
+    playScanFeedback(settings.soundEnabled, settings.vibrationEnabled);
+
+    setScannedBarcode(clean);
+
+    // 3. Look up product
+    const existing = storage.getProductByBarcode(clean);
+    if (existing) {
+      setCurrentProduct(existing);
+      const lowest = storage.getLowestPriceForProduct(existing.id);
+      setLowestPriceInfo(lowest);
+      setPriceCents(0);
+      setScannerStatus('PRODUCT_FOUND');
+    } else {
+      // New product inline flow
+      setCurrentProduct(null);
+      setLowestPriceInfo(null);
+      setNewProductName('');
+      setNewProductBrand('');
+      setNewProductUnitType('g');
+      setNewProductQuantity('');
+      setScannerStatus('NEW_PRODUCT');
+    }
+  }, [stopCamera]);
+
+  // Initialize Camera Stream directly using getUserMedia
+  const initCamera = useCallback(async () => {
+    try {
+      setCameraError(null);
+      stopCamera();
+
+      // Request camera fresh
+      const constraints: MediaStreamConstraints = {
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      };
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      mediaStreamRef.current = stream;
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.setAttribute('playsinline', 'true');
+        await videoRef.current.play().catch(() => {});
+      }
+
+      // Check torch capability
+      const videoTrack = stream.getVideoTracks()[0];
+      if (videoTrack) {
+        try {
+          const capabilities = videoTrack.getCapabilities?.() as { torch?: boolean };
+          if (capabilities && capabilities.torch) {
+            setTorchSupported(true);
+          }
+        } catch {
+          // Ignore capabilities check failure
+        }
+      }
+
+      // Start detection loop fresh
+      isScanningActiveRef.current = true;
+      startDetectionLoop(handleBarcodeDetected);
+    } catch (err: unknown) {
+      console.warn('Camera access error:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('NotAllowedError') || msg.includes('Permission')) {
+        setCameraError('Permissão da câmera não concedida. Permita o acesso nas configurações do navegador ou digite o código.');
+      } else {
+        setCameraError('Não foi possível iniciar a câmera deste aparelho. Use a digitação manual ou os testes rápidos.');
+      }
+    }
+  }, [stopCamera, startDetectionLoop, handleBarcodeDetected]);
+
+  // Start camera on initial mount if status is WAITING_SCAN
   useEffect(() => {
     initCamera();
 
     return () => {
-      // Cleanup on unmount
-      if (animationFrameIdRef.current) {
-        cancelAnimationFrame(animationFrameIdRef.current);
-      }
-      if (mediaStreamRef.current) {
-        mediaStreamRef.current.getTracks().forEach((t) => t.stop());
-        mediaStreamRef.current = null;
-      }
+      stopCamera();
     };
-  }, [initCamera]);
+  }, []);
 
   // Toggle Flashlight
   const toggleTorch = async () => {
@@ -339,11 +337,8 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     setSavedPriceNotice(null);
     setScannerStatus('WAITING_SCAN');
 
-    // Resume video and scanner loop cleanly
-    isScanningActiveRef.current = true;
-    if (videoRef.current) {
-      videoRef.current.play().catch(() => {});
-    }
+    // Turn camera back on fresh for the next reading
+    initCamera();
   };
 
   // Brand autocomplete logic
@@ -393,15 +388,17 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         </button>
       </header>
 
-      {/* 2. Área Central: Câmera Nativa sem dependências intrusivas */}
+      {/* 2. Área Central: Câmera ou Painel de Repouso */}
       <div className="relative flex-1 bg-black flex flex-col justify-center items-center overflow-hidden">
-        {/* Elemento de Vídeo Real HTML5 */}
+        {/* Elemento de Vídeo Real HTML5 (sempre montado para streaming direto) */}
         <video
           ref={videoRef}
           playsInline
           autoPlay
           muted
-          className="w-full h-full object-cover"
+          className={`w-full h-full object-cover transition-opacity duration-200 ${
+            scannerStatus === 'WAITING_SCAN' ? 'opacity-100' : 'opacity-0 pointer-events-none'
+          }`}
         />
 
         {/* Overlay com mira óptica exclusivo do estado WAITING_SCAN */}
@@ -425,15 +422,18 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
           </div>
         )}
 
-        {/* Câmera pausada overlay (se produto detectado ou salvo) */}
+        {/* Câmera Desligada em Standby (quando o produto é detectado ou preço salvo) */}
         {scannerStatus !== 'WAITING_SCAN' && (
-          <div className="absolute inset-0 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-4 z-10">
-            <div className="text-center">
-              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                Câmera em pausa (Economizando bateria)
-              </span>
+          <div className="absolute inset-0 bg-slate-950 flex flex-col items-center justify-center p-6 text-center z-10">
+            <div className="w-12 h-12 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 mb-2">
+              <Camera className="w-6 h-6" />
             </div>
+            <div className="text-xs font-semibold text-slate-300">
+              Câmera desligada
+            </div>
+            <p className="text-[11px] text-slate-500 mt-0.5 max-w-xs">
+              A câmera fica em repouso economizando bateria enquanto você registra o preço.
+            </p>
           </div>
         )}
 
@@ -739,7 +739,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         </form>
       )}
 
-      {/* ESTADO 3: PREÇO SALVO -> Câmera Pausada e BOTÃO GIGANTE "PRÓXIMO PRODUTO" */}
+      {/* ESTADO 3: PREÇO SALVO -> Câmera Desligada e BOTÃO GIGANTE "PRÓXIMO PRODUTO" */}
       {scannerStatus === 'PRICE_SAVED' && (
         <div className="shrink-0 bg-slate-900 border-t border-slate-800 p-4 space-y-3 animate-in slide-in-from-bottom duration-200 z-30">
           {/* Confirmação do produto salvo */}
@@ -761,7 +761,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
             </div>
           </div>
 
-          {/* BOTÃO GIGANTE "PRÓXIMO PRODUTO" */}
+          {/* BOTÃO GIGANTE "PRÓXIMO PRODUTO" -> Ao clicar, reinicia a câmera fresh */}
           <button
             type="button"
             autoFocus
