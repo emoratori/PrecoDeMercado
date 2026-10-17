@@ -12,6 +12,7 @@ import {
   Info,
   CheckCircle2,
   Sparkles,
+  RefreshCw,
 } from 'lucide-react';
 
 export const SettingsView: React.FC = () => {
@@ -155,6 +156,44 @@ export const SettingsView: React.FC = () => {
           No navegador Chrome do Android, basta tocar no menu de 3 pontinhos e selecionar{' '}
           <strong className="text-white">"Adicionar à tela inicial"</strong> para utilizá-lo como um app nativo, inclusive em modo avião.
         </p>
+      </div>
+
+      {/* Atualização Forçada de Versão */}
+      <div className="p-4 bg-slate-900 border border-slate-800 rounded-2xl space-y-2.5">
+        <div className="flex items-center justify-between">
+          <div className="font-bold text-sm text-white flex items-center gap-2">
+            <RefreshCw className="w-4 h-4 text-emerald-400" />
+            Atualização do App
+          </div>
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+            v3.0 Câmera Fix
+          </span>
+        </div>
+        <p className="text-xs text-slate-400">
+          Se o seu celular estiver travado na versão antiga de cache, use este botão para forçar o download da versão mais recente:
+        </p>
+        <button
+          type="button"
+          onClick={async () => {
+            if ('serviceWorker' in navigator) {
+              const registrations = await navigator.serviceWorker.getRegistrations();
+              for (const r of registrations) {
+                await r.unregister();
+              }
+            }
+            if ('caches' in window) {
+              const keys = await caches.keys();
+              for (const k of keys) {
+                await caches.delete(k);
+              }
+            }
+            window.location.reload();
+          }}
+          className="h-10 px-4 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-emerald-300 font-bold text-xs flex items-center justify-center gap-2 cursor-pointer w-full transition-all"
+        >
+          <RefreshCw className="w-4 h-4" />
+          <span>Atualizar para a Versão Mais Recente</span>
+        </button>
       </div>
 
       {/* Zona de Perigo: Limpar todos os dados */}

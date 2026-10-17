@@ -8,7 +8,9 @@ createRoot(document.getElementById('root')!).render(<App />);
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     const swUrl = `${import.meta.env.BASE_URL}sw.js`;
-    navigator.serviceWorker.register(swUrl).catch((err) => {
+    navigator.serviceWorker.register(swUrl).then((registration) => {
+      registration.update();
+    }).catch((err) => {
       console.warn('SW registration error:', err);
     });
   });
