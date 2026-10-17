@@ -13,6 +13,9 @@ import {
   CheckCircle2,
   Sparkles,
   RefreshCw,
+  ArrowUpDown,
+  TrendingDown,
+  Calendar,
 } from 'lucide-react';
 
 export const SettingsView: React.FC = () => {
@@ -139,6 +142,45 @@ export const SettingsView: React.FC = () => {
               />
             </button>
           </div>
+        </div>
+      </div>
+
+      {/* Ordenação Padrão do Histórico de Preços */}
+      <div className="p-4 bg-slate-900 border border-slate-800 rounded-2xl space-y-3">
+        <h3 className="font-bold text-sm text-white flex items-center gap-2">
+          <ArrowUpDown className="w-4 h-4 text-emerald-400" />
+          Ordenação Padrão do Histórico
+        </h3>
+        <p className="text-xs text-slate-400">
+          Define como a lista de histórico de preços de um produto salvo será exibida inicialmente:
+        </p>
+
+        <div className="grid grid-cols-2 gap-2 pt-1">
+          <button
+            type="button"
+            onClick={() => handleUpdate({ defaultPriceSort: 'lowest' })}
+            className={`py-2.5 px-3 rounded-xl border text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+              (settings.defaultPriceSort || 'lowest') === 'lowest'
+                ? 'bg-emerald-500 text-slate-950 border-emerald-400 shadow-md'
+                : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+            }`}
+          >
+            <TrendingDown className="w-3.5 h-3.5" />
+            <span>Menor Preço</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleUpdate({ defaultPriceSort: 'recent' })}
+            className={`py-2.5 px-3 rounded-xl border text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+              settings.defaultPriceSort === 'recent'
+                ? 'bg-emerald-500 text-slate-950 border-emerald-400 shadow-md'
+                : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+            }`}
+          >
+            <Calendar className="w-3.5 h-3.5" />
+            <span>Mais Recente</span>
+          </button>
         </div>
       </div>
 

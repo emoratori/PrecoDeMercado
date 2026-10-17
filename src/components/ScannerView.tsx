@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { BrowserMultiFormatReader, BarcodeFormat, DecodeHintType } from '@zxing/library';
-import { Market, Product, ScannerStatus } from '../types';
+import { Market, Product, PriceRecord, ScannerStatus } from '../types';
 import { storage } from '../services/storage';
 import { playScanFeedback, playSuccessSound } from '../services/audioHaptics';
 import { Keypad, formatCurrencyCents } from './Keypad';
@@ -14,9 +14,12 @@ import {
   ChevronRight,
   TrendingDown,
   AlertCircle,
+  AlertTriangle,
   CheckCircle2,
   PackagePlus,
   RefreshCw,
+  Trash2,
+  Calendar,
 } from 'lucide-react';
 
 interface ScannerViewProps {
@@ -40,6 +43,11 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
   // Keypad state
   const [priceCents, setPriceCents] = useState<number>(0);
   const [savedPriceNotice, setSavedPriceNotice] = useState<string | null>(null);
+
+  // Price history display state for PRICE_SAVED screen
+  const [productPricesHistory, setProductPricesHistory] = useState<PriceRecord[]>([]);
+  const [historySortMode, setHistorySortMode] = useState<'lowest' | 'recent'>('lowest');
+  const [priceToDelete, setPriceToDelete] = useState<PriceRecord | null>(null);
 
   // New product form state: radio button [ml] e [g] + campo numérico para valor
   const [newProductName, setNewProductName] = useState('');
@@ -68,6 +76,27 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
   useEffect(() => {
     setKnownBrands(storage.getAllKnownBrands());
   }, []);
+
+  // Format date time helper (ex: 17/10/2026 às 00:43)
+  const formatDateTime = (isoString: string) => {
+    try {
+      const d = new Date(isoString);
+      const day = String(d.getDate()).padStart(2, '0');
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const year = d.getFullYear();
+      const hours = String(d.getHours()).padStart(2, '0');
+      const minutes = String(d.getMinutes()).padStart(2, '0');
+      return `${day}/${month}/${year} às ${hours}:${minutes}`;
+    } catch {
+      return isoString;
+    }
+  };
+
+  // Market name lookup helper
+  const getMarketName = (marketId: number): string => {
+    const market = storage.getMarketById(marketId);
+    return market ? market.name : 'Mercado desconhecido';
+  };
 
   // Stop camera stream completely to save battery and ensure a clean state
   const stopCamera = useCallback(() => {
@@ -258,7 +287,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     }
   }, [stopCamera, startDetectionLoop, handleBarcodeDetected]);
 
-  // Start camera on initial mount if status is WAITING_SCAN
+  // Start camera on initial mount
   useEffect(() => {
     initCamera();
 
@@ -290,9 +319,31 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
       storage.addPrice(currentProduct.id, currentMarket.id, priceCents);
       playSuccessSound();
       setSavedPriceNotice(`Preço salvo com sucesso: ${formatCurrencyCents(priceCents)}`);
+
+      // Load updated price history for this product
+      const updatedHistory = storage.getPricesForProduct(currentProduct.id);
+      setProductPricesHistory(updatedHistory);
+
+      // Read default sort preference from settings (either 'lowest' or 'recent')
+      const settings = storage.getSettings();
+      setHistorySortMode(settings.defaultPriceSort || 'lowest');
+
       setScannerStatus('PRICE_SAVED');
     } catch (err: unknown) {
       alert(err instanceof Error ? err.message : 'Erro ao salvar preço.');
+    }
+  };
+
+  // Confirm delete price handler
+  const handleConfirmDeletePrice = () => {
+    if (!priceToDelete || !currentProduct) return;
+    try {
+      storage.deletePrice(priceToDelete.id);
+      const updatedHistory = storage.getPricesForProduct(currentProduct.id);
+      setProductPricesHistory(updatedHistory);
+      setPriceToDelete(null);
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : 'Erro ao excluir preço.');
     }
   };
 
@@ -335,6 +386,8 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     setLowestPriceInfo(null);
     setPriceCents(0);
     setSavedPriceNotice(null);
+    setProductPricesHistory([]);
+    setPriceToDelete(null);
     setScannerStatus('WAITING_SCAN');
 
     // Turn camera back on fresh for the next reading
@@ -359,6 +412,21 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     setNewProductBrand(brand);
     setShowBrandSuggestions(false);
   };
+
+  // Sorted prices for history view
+  const sortedHistoryPrices = [...productPricesHistory].sort((a, b) => {
+    if (historySortMode === 'lowest') {
+      if (a.price_cents !== b.price_cents) {
+        return a.price_cents - b.price_cents;
+      }
+      return new Date(b.recorded_at).getTime() - new Date(a.recorded_at).getTime();
+    }
+    return new Date(b.recorded_at).getTime() - new Date(a.recorded_at).getTime();
+  });
+
+  const lowestHistoryPriceCents = productPricesHistory.length > 0
+    ? Math.min(...productPricesHistory.map((p) => p.price_cents))
+    : 0;
 
   return (
     <div className="flex flex-col h-full bg-slate-950 text-white select-none overflow-hidden relative">
@@ -388,43 +456,221 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         </button>
       </header>
 
-      {/* 2. Área Central: Câmera ou Painel de Repouso */}
-      <div className="relative flex-1 bg-black flex flex-col justify-center items-center overflow-hidden">
-        {/* Elemento de Vídeo Real HTML5 (sempre montado para streaming direto) */}
-        <video
-          ref={videoRef}
-          playsInline
-          autoPlay
-          muted
-          className={`w-full h-full object-cover transition-opacity duration-200 ${
-            scannerStatus === 'WAITING_SCAN' ? 'opacity-100' : 'opacity-0 pointer-events-none'
-          }`}
-        />
-
-        {/* Overlay com mira óptica exclusivo do estado WAITING_SCAN */}
+      {/* 2. Área Central: Câmera (WAITING_SCAN) OU Histórico Completo (PRICE_SAVED) OU Repouso */}
+      <div className="relative flex-1 bg-slate-950 flex flex-col overflow-hidden">
+        {/* Quando estiver escaneando: exibe o visor de câmera */}
         {scannerStatus === 'WAITING_SCAN' && (
-          <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center p-6 z-10">
-            {/* Retângulo de mira centralizado */}
-            <div className="relative w-72 h-44 border-2 border-emerald-400/80 rounded-2xl shadow-[0_0_20px_rgba(16,185,129,0.3)] flex items-center justify-center">
-              {/* Linha vermelha central de leitor a laser */}
-              <div className="w-full h-0.5 bg-rose-500/80 shadow-[0_0_8px_rgba(244,63,94,0.8)] animate-pulse" />
+          <div className="relative w-full h-full bg-black flex flex-col justify-center items-center overflow-hidden">
+            <video
+              ref={videoRef}
+              playsInline
+              autoPlay
+              muted
+              className="w-full h-full object-cover"
+            />
 
-              {/* Cantoneiras estéticas de foco */}
-              <div className="absolute top-1 left-1 w-4 h-4 border-t-2 border-l-2 border-white rounded-tl-sm" />
-              <div className="absolute top-1 right-1 w-4 h-4 border-t-2 border-r-2 border-white rounded-tr-sm" />
-              <div className="absolute bottom-1 left-1 w-4 h-4 border-b-2 border-l-2 border-white rounded-bl-sm" />
-              <div className="absolute bottom-1 right-1 w-4 h-4 border-b-2 border-r-2 border-white rounded-br-sm" />
+            {/* Overlay com mira óptica */}
+            <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center p-6 z-10">
+              <div className="relative w-72 h-44 border-2 border-emerald-400/80 rounded-2xl shadow-[0_0_20px_rgba(16,185,129,0.3)] flex items-center justify-center">
+                <div className="w-full h-0.5 bg-rose-500/80 shadow-[0_0_8px_rgba(244,63,94,0.8)] animate-pulse" />
+                <div className="absolute top-1 left-1 w-4 h-4 border-t-2 border-l-2 border-white rounded-tl-sm" />
+                <div className="absolute top-1 right-1 w-4 h-4 border-t-2 border-r-2 border-white rounded-tr-sm" />
+                <div className="absolute bottom-1 left-1 w-4 h-4 border-b-2 border-l-2 border-white rounded-bl-sm" />
+                <div className="absolute bottom-1 right-1 w-4 h-4 border-b-2 border-r-2 border-white rounded-br-sm" />
+              </div>
+
+              <p className="mt-4 text-xs font-medium text-white/90 bg-slate-900/80 px-3.5 py-1.5 rounded-full backdrop-blur-sm border border-slate-700/50">
+                Aponte para o código de barras do produto
+              </p>
             </div>
 
-            <p className="mt-4 text-xs font-medium text-white/90 bg-slate-900/80 px-3.5 py-1.5 rounded-full backdrop-blur-sm border border-slate-700/50">
-              Aponte para o código de barras do produto
-            </p>
+            {/* Botões Lanterna e Digitar Código */}
+            <div className="absolute top-3 right-3 flex items-center gap-2 z-20">
+              {torchSupported && (
+                <button
+                  type="button"
+                  onClick={toggleTorch}
+                  className={`p-2.5 rounded-xl border backdrop-blur-md transition-all cursor-pointer ${
+                    isTorchOn
+                      ? 'bg-amber-400 text-slate-950 border-amber-300 shadow-lg shadow-amber-400/40'
+                      : 'bg-slate-900/80 text-white border-slate-700 hover:bg-slate-800'
+                  }`}
+                  title="Lanterna"
+                >
+                  {isTorchOn ? <Flashlight className="w-5 h-5" /> : <FlashlightOff className="w-5 h-5" />}
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setManualCodeModal(true)}
+                className="px-3 py-2 rounded-xl bg-slate-900/85 hover:bg-slate-800 active:scale-95 text-white border border-slate-700 backdrop-blur-md flex items-center gap-1.5 text-xs font-semibold cursor-pointer shadow-md"
+              >
+                <Keyboard className="w-4 h-4 text-emerald-400" />
+                <span>Digitar código</span>
+              </button>
+            </div>
+
+            {/* Testes Rápidos */}
+            <div className="absolute bottom-2 left-2 right-2 flex items-center justify-center gap-1.5 z-20 flex-wrap">
+              <span className="text-[10px] text-slate-400 bg-black/60 px-2 py-0.5 rounded-md">
+                Testar rápido:
+              </span>
+              <button
+                type="button"
+                onClick={() => handleBarcodeDetected('7891000100103')}
+                className="text-[11px] bg-slate-900/80 hover:bg-emerald-600/80 border border-slate-700 text-slate-200 px-2 py-1 rounded-lg backdrop-blur-sm cursor-pointer"
+              >
+                🥛 Leite Piracanjuba
+              </button>
+              <button
+                type="button"
+                onClick={() => handleBarcodeDetected('7891025114130')}
+                className="text-[11px] bg-slate-900/80 hover:bg-emerald-600/80 border border-slate-700 text-slate-200 px-2 py-1 rounded-lg backdrop-blur-sm cursor-pointer"
+              >
+                🍚 Arroz Tio João
+              </button>
+              <button
+                type="button"
+                onClick={() => handleBarcodeDetected('7899999000001')}
+                className="text-[11px] bg-emerald-950/80 hover:bg-emerald-800 border border-emerald-600/50 text-emerald-300 px-2 py-1 rounded-lg backdrop-blur-sm cursor-pointer"
+              >
+                ✨ + Produto Novo
+              </button>
+            </div>
+
+            {/* Erro de Câmera */}
+            {cameraError && (
+              <div className="absolute inset-0 bg-slate-950/95 flex flex-col items-center justify-center p-6 text-center z-30">
+                <AlertCircle className="w-12 h-12 text-amber-400 mb-3" />
+                <h3 className="text-base font-bold text-white mb-1">Acesso à Câmera</h3>
+                <p className="text-xs text-slate-400 max-w-sm mb-4">{cameraError}</p>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={initCamera}
+                    className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    Tentar Novamente
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setManualCodeModal(true)}
+                    className="px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Keyboard className="w-3.5 h-3.5" />
+                    Digitar Código Manualmente
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
-        {/* Câmera Desligada em Standby (quando o produto é detectado ou preço salvo) */}
-        {scannerStatus !== 'WAITING_SCAN' && (
-          <div className="absolute inset-0 bg-slate-950 flex flex-col items-center justify-center p-6 text-center z-10">
+        {/* ESTADO PRICE_SAVED: EXIBIÇÃO DO HISTÓRICO COMPLETO (Exatamente como Sugerido.png) */}
+        {scannerStatus === 'PRICE_SAVED' && (
+          <div className="flex-1 flex flex-col overflow-hidden animate-in fade-in duration-200">
+            {/* 1. Banner de Sucesso */}
+            <div className="mx-4 mt-3 p-3.5 rounded-2xl bg-emerald-950/80 border border-emerald-600/50 flex items-center gap-3 shrink-0 shadow-lg">
+              <div className="w-10 h-10 rounded-xl bg-emerald-500 text-slate-950 flex items-center justify-center shrink-0">
+                <CheckCircle2 className="w-6 h-6 stroke-[2.5]" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-semibold text-emerald-300">
+                  {savedPriceNotice || 'Preço salvo com sucesso'}
+                </div>
+                <div className="text-sm font-bold text-white truncate">
+                  {currentProduct?.name} {currentProduct?.unit ? `(${currentProduct.unit})` : ''}
+                </div>
+              </div>
+            </div>
+
+            {/* 2. Cabeçalho do Histórico com Abas de Ordenação */}
+            <div className="px-4 pt-3.5 pb-2 flex items-center justify-between shrink-0">
+              <span className="text-xs font-extrabold text-slate-300 tracking-wider">
+                HISTÓRICO ({productPricesHistory.length})
+              </span>
+
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setHistorySortMode('lowest')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                    historySortMode === 'lowest'
+                      ? 'bg-emerald-500 text-slate-950 border-emerald-400 shadow-md'
+                      : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
+                  }`}
+                >
+                  Menor Preço
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setHistorySortMode('recent')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                    historySortMode === 'recent'
+                      ? 'bg-emerald-500 text-slate-950 border-emerald-400 shadow-md'
+                      : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
+                  }`}
+                >
+                  Mais Recente
+                </button>
+              </div>
+            </div>
+
+            {/* 3. Lista de Preços com Rolagem */}
+            <div className="flex-1 overflow-y-auto px-4 pb-2 space-y-2.5">
+              {sortedHistoryPrices.length === 0 ? (
+                <div className="text-center py-8 text-xs text-slate-500">
+                  Nenhum registro de preço encontrado.
+                </div>
+              ) : (
+                sortedHistoryPrices.map((item) => {
+                  const isLowest = item.price_cents === lowestHistoryPriceCents;
+                  return (
+                    <div
+                      key={item.id}
+                      className={`p-3 rounded-2xl border transition-all flex items-center justify-between ${
+                        isLowest
+                          ? 'bg-emerald-950/20 border-emerald-500/60 shadow-md'
+                          : 'bg-slate-900/90 border-slate-800 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="min-w-0 pr-2">
+                        <div className="flex items-center gap-1.5 text-sm font-bold text-white truncate">
+                          <Store className="w-4 h-4 text-slate-400 shrink-0" />
+                          <span className="truncate">{getMarketName(item.market_id)}</span>
+                        </div>
+                        <div className="text-[11px] text-slate-400 font-mono flex items-center gap-1 mt-1">
+                          <Calendar className="w-3.5 h-3.5 shrink-0" />
+                          <span>{formatDateTime(item.recorded_at)}</span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2.5 shrink-0">
+                        <span className="text-base font-extrabold text-white">
+                          {formatCurrencyCents(item.price_cents)}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setPriceToDelete(item)}
+                          className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-950/30 transition-colors cursor-pointer"
+                          title="Excluir este preço"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Em outros estados (PRODUCT_FOUND ou NEW_PRODUCT), câmera desligada */}
+        {scannerStatus !== 'WAITING_SCAN' && scannerStatus !== 'PRICE_SAVED' && (
+          <div className="flex-1 bg-slate-950 flex flex-col items-center justify-center p-6 text-center">
             <div className="w-12 h-12 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 mb-2">
               <Camera className="w-6 h-6" />
             </div>
@@ -434,92 +680,6 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
             <p className="text-[11px] text-slate-500 mt-0.5 max-w-xs">
               A câmera fica em repouso economizando bateria enquanto você registra o preço.
             </p>
-          </div>
-        )}
-
-        {/* Botões de Ação Rápida Flutuantes sobre a Câmera */}
-        {scannerStatus === 'WAITING_SCAN' && (
-          <div className="absolute top-3 right-3 flex items-center gap-2 z-20">
-            {torchSupported && (
-              <button
-                type="button"
-                onClick={toggleTorch}
-                className={`p-2.5 rounded-xl border backdrop-blur-md transition-all cursor-pointer ${
-                  isTorchOn
-                    ? 'bg-amber-400 text-slate-950 border-amber-300 shadow-lg shadow-amber-400/40'
-                    : 'bg-slate-900/80 text-white border-slate-700 hover:bg-slate-800'
-                }`}
-                title="Lanterna"
-              >
-                {isTorchOn ? <Flashlight className="w-5 h-5" /> : <FlashlightOff className="w-5 h-5" />}
-              </button>
-            )}
-
-            <button
-              type="button"
-              onClick={() => setManualCodeModal(true)}
-              className="px-3 py-2 rounded-xl bg-slate-900/85 hover:bg-slate-800 active:scale-95 text-white border border-slate-700 backdrop-blur-md flex items-center gap-1.5 text-xs font-semibold cursor-pointer shadow-md"
-            >
-              <Keyboard className="w-4 h-4 text-emerald-400" />
-              <span>Digitar código</span>
-            </button>
-          </div>
-        )}
-
-        {/* Simulador rápido de Códigos para Teste Rápido */}
-        {scannerStatus === 'WAITING_SCAN' && (
-          <div className="absolute bottom-2 left-2 right-2 flex items-center justify-center gap-1.5 z-20 flex-wrap">
-            <span className="text-[10px] text-slate-400 bg-black/60 px-2 py-0.5 rounded-md">
-              Testar rápido:
-            </span>
-            <button
-              type="button"
-              onClick={() => handleBarcodeDetected('7891000100103')}
-              className="text-[11px] bg-slate-900/80 hover:bg-emerald-600/80 border border-slate-700 text-slate-200 px-2 py-1 rounded-lg backdrop-blur-sm cursor-pointer"
-            >
-              🥛 Leite Piracanjuba
-            </button>
-            <button
-              type="button"
-              onClick={() => handleBarcodeDetected('7891025114130')}
-              className="text-[11px] bg-slate-900/80 hover:bg-emerald-600/80 border border-slate-700 text-slate-200 px-2 py-1 rounded-lg backdrop-blur-sm cursor-pointer"
-            >
-              🍚 Arroz Tio João
-            </button>
-            <button
-              type="button"
-              onClick={() => handleBarcodeDetected('7899999000001')}
-              className="text-[11px] bg-emerald-950/80 hover:bg-emerald-800 border border-emerald-600/50 text-emerald-300 px-2 py-1 rounded-lg backdrop-blur-sm cursor-pointer"
-            >
-              ✨ + Produto Novo
-            </button>
-          </div>
-        )}
-
-        {/* Mensagem caso câmera não seja permitida */}
-        {cameraError && scannerStatus === 'WAITING_SCAN' && (
-          <div className="absolute inset-0 bg-slate-950/95 flex flex-col items-center justify-center p-6 text-center z-30">
-            <AlertCircle className="w-12 h-12 text-amber-400 mb-3" />
-            <h3 className="text-base font-bold text-white mb-1">Acesso à Câmera</h3>
-            <p className="text-xs text-slate-400 max-w-sm mb-4">{cameraError}</p>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={initCamera}
-                className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs flex items-center gap-1.5 cursor-pointer"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                Tentar Novamente
-              </button>
-              <button
-                type="button"
-                onClick={() => setManualCodeModal(true)}
-                className="px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 cursor-pointer"
-              >
-                <Keyboard className="w-3.5 h-3.5" />
-                Digitar Código Manualmente
-              </button>
-            </div>
           </div>
         )}
       </div>
@@ -739,38 +899,49 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         </form>
       )}
 
-      {/* ESTADO 3: PREÇO SALVO -> Câmera Desligada e BOTÃO GIGANTE "PRÓXIMO PRODUTO" */}
+      {/* ESTADO 3: PREÇO SALVO -> Apenas o BOTÃO GIGANTE "PRÓXIMO PRODUTO" na base fixa */}
       {scannerStatus === 'PRICE_SAVED' && (
-        <div className="shrink-0 bg-slate-900 border-t border-slate-800 p-4 space-y-3 animate-in slide-in-from-bottom duration-200 z-30">
-          {/* Confirmação do produto salvo */}
-          <div className="p-3 rounded-2xl bg-emerald-950/80 border border-emerald-600/50 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-emerald-500 text-slate-950 flex items-center justify-center">
-                <CheckCircle2 className="w-6 h-6 stroke-[2.5]" />
-              </div>
-              <div>
-                <div className="text-xs font-semibold text-emerald-300">
-                  {savedPriceNotice || 'Preço registrado com sucesso!'}
-                </div>
-                {currentProduct && (
-                  <div className="text-sm font-bold text-white truncate max-w-[220px]">
-                    {currentProduct.name}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* BOTÃO GIGANTE "PRÓXIMO PRODUTO" -> Ao clicar, reinicia a câmera fresh */}
+        <div className="shrink-0 bg-slate-950 px-4 pt-2 pb-4 z-30">
           <button
             type="button"
             autoFocus
             onClick={handleNextProduct}
-            className="w-full h-16 sm:h-18 rounded-2xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 active:scale-[0.98] text-slate-950 font-black text-xl tracking-wide uppercase shadow-2xl shadow-emerald-500/40 flex items-center justify-center gap-3 cursor-pointer transition-all border border-emerald-300"
+            className="w-full h-15 sm:h-16 rounded-2xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 active:scale-[0.98] text-slate-950 font-black text-lg tracking-wide uppercase shadow-2xl shadow-emerald-500/40 flex items-center justify-center gap-2.5 cursor-pointer transition-all border border-emerald-300"
           >
-            <Camera className="w-7 h-7 stroke-[2.5]" />
+            <Camera className="w-6 h-6 stroke-[2.5]" />
             <span>PRÓXIMO PRODUTO</span>
           </button>
+        </div>
+      )}
+
+      {/* Modal de Confirmação para Excluir Registro de Preço */}
+      {priceToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-sm p-4">
+          <div className="w-full max-w-sm bg-slate-900 border border-rose-900/60 rounded-3xl p-5 shadow-2xl text-center space-y-3">
+            <div className="w-12 h-12 rounded-2xl bg-rose-500/20 text-rose-400 flex items-center justify-center mx-auto">
+              <AlertTriangle className="w-6 h-6" />
+            </div>
+            <h3 className="text-base font-bold text-white">Excluir este preço?</h3>
+            <p className="text-xs text-slate-300 leading-relaxed">
+              Você deseja apagar o registro de <strong className="text-white">{formatCurrencyCents(priceToDelete.price_cents)}</strong> feito em <strong className="text-white">{getMarketName(priceToDelete.market_id)}</strong> em {formatDateTime(priceToDelete.recorded_at)}?
+            </p>
+            <div className="flex gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setPriceToDelete(null)}
+                className="flex-1 py-2.5 rounded-xl bg-slate-800 text-slate-300 font-semibold text-sm hover:bg-slate-700 cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDeletePrice}
+                className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-sm shadow-md cursor-pointer"
+              >
+                Sim, Excluir
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

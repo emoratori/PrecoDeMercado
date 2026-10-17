@@ -14,6 +14,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   distanceUnit: 'auto',
   soundEnabled: true,
   vibrationEnabled: true,
+  defaultPriceSort: 'lowest',
 };
 
 const SEED_MARKETS: Market[] = [

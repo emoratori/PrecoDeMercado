@@ -44,6 +44,7 @@ export interface AppSettings {
   distanceUnit: 'auto' | 'm' | 'km';
   soundEnabled: boolean;
   vibrationEnabled: boolean;
+  defaultPriceSort?: 'lowest' | 'recent';
 }
 
 export interface BackupData {

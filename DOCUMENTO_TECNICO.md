@@ -234,15 +234,20 @@ Composta por:
   * Botão **"Salvar e Digitar Preço"**.
   * Transiciona imediatamente para o Keypad de preço.
 
-#### Estado 4: `PRICE_SAVED` (Preço Registrado)
-* O preço é salvo no SQLite: `product_id`, `market_id`, `price_cents`, `recorded_at`.
-* Toast/Banner discreto: *"Preço R$ 7,99 salvo com sucesso!"*.
-* A câmera **permanece pausada**.
-* Ocupando a base da tela, surge o botão de ação primária:
+#### Estado 4: `PRICE_SAVED` (Preço Registrado e Histórico Comparativo)
+* O preço é salvo no SQLite/Storage: `product_id`, `market_id`, `price_cents`, `recorded_at`.
+* A câmera é **completamente desligada no hardware** (`track.stop()`) para economizar bateria e eliminar luzes de aviso.
+* **Banner de Sucesso Superior:**
+  * Ícone verde com *"Preço salvo com sucesso: R$ X,XX"* e nome do produto.
+* **Área Central: Histórico Comparativo do Produto:**
+  * Cabeçalho com contador `HISTÓRICO (X)` e abas de ordenação: **`[ Menor Preço ]`** e **`[ Mais Recente ]`**.
+  * A ordenação inicial respeita a preferência configurada na tela de **Ajustes** (`defaultPriceSort: 'lowest' | 'recent'`).
+  * Lista de registros com mercado, data/hora formatada (`DD/MM/AAAA às HH:mm`), valor em destaque e realce visual (borda verde) no menor preço histórico.
+  * Botão de lixeira em cada registro, sempre com **modal de confirmação antes de excluir**.
+* **Base Fixa com Botão de Ação Primária:**
   * **Texto:** `"PRÓXIMO PRODUTO"`
-  * **Dimensões:** Altura mínima de **64 dp**, largura quase total da tela.
-  * **Cor:** Primária, alto contraste.
-  * **Ação do botão:** Limpa os dados do produto atual, zera o keypad e **reativa a câmera** voltando para o estado `WAITING_SCAN`.
+  * **Dimensões:** Altura de destaque (60-64 dp), alta visibilidade em verde esmeralda.
+  * **Ação do botão:** Limpa os dados do produto atual e **religa a câmera limpa e fresca**, retornando ao estado `WAITING_SCAN`.
 
 ---
 
